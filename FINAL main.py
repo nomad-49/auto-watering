@@ -1,4 +1,4 @@
-# how to import picozero https://projects.raspberrypi.org/en/projects/get-started-pico-w/1
+### how to import picozero https://projects.raspberrypi.org/en/projects/get-started-pico-w/1
 from picozero import pico_temp_sensor, pico_led
 import network
 import socket
