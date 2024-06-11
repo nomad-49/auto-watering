@@ -8,10 +8,16 @@ from time import sleep, localtime
 from machine import Pin, ADC
 import gc
 import json
+import ntptime
+import urequests  # Add urequests to handle HTTP requests
+import os  # Import os for file removal
 
 # Wi-Fi credentials
 ssid = 'VM5792329'
 password = 'rk2dqJpcGyjd'
+
+# URL to check for updates (modified to direct download link)
+update_url = 'https://github.com/nomad-49/auto-watering/blob/main/FINAL%20main.py'
 
 # Set up the analog pin for the moisture sensor
 moisture_pin = ADC(26)
@@ -37,6 +43,10 @@ pump_state = False
 # Global variable for software watchdog
 last_check_time = utime.time()
 watchdog_timeout = 180  # 180-second timeout period
+
+# Update check interval (in seconds)
+update_check_interval = 3600  # 1 hour
+last_update_check = utime.time()  # Initialize to current time to avoid immediate check
 
 # Maximum pump activation time and cooldown
 max_pump_time = 60  # 60 seconds
@@ -92,12 +102,80 @@ def connect():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     wlan.connect(ssid, password)
-    while not wlan.isconnected():
+    max_attempts = 20  # Maximum number of attempts to connect
+    attempt = 0
+    while not wlan.isconnected() and attempt < max_attempts:
         print('Waiting for connection...')
         sleep(3)
-    ip = wlan.ifconfig()[0]
-    print(f'Connected on {ip}')
-    return ip
+        attempt += 1
+    if wlan.isconnected():
+        ip = wlan.ifconfig()[0]
+        print(f'Connected on {ip}')
+        return ip
+    else:
+        print('Failed to connect to Wi-Fi')
+        machine.reset()
+
+# Function to synchronize time with NTP server
+def sync_time():
+    try:
+        ntptime.settime()
+        print('Time synchronized')
+    except:
+        print('Failed to synchronize time')
+
+# Function to download a file from a URL in chunks
+def download_file(url, file_path):
+    try:
+        response = urequests.get(url)
+        if response.status_code == 200:
+            with open(file_path, 'w') as file:
+                while True:
+                    chunk = response.raw.read(512)
+                    if not chunk:
+                        break
+                    file.write(chunk.decode('utf-8'))
+            print(f'Successfully downloaded {file_path}')
+        else:
+            print(f'Failed to download {file_path}: {response.status_code}')
+        response.close()
+    except Exception as e:
+        print(f'Error downloading {file_path}: {e}')
+
+# Function to check for updates
+def check_for_updates():
+    print('Checking for updates...')
+    download_file(update_url, 'new_main.py')
+    try:
+        with open('new_main.py', 'r') as update_file:
+            with open('main.py', 'r') as main_file:
+                while True:
+                    update_chunk = update_file.read(512)
+                    main_chunk = main_file.read(512)
+                    if update_chunk != main_chunk:
+                        break
+                    if not update_chunk:
+                        print('No update found')
+                        return
+
+        print('New update found, updating main.py')
+        with open('new_main.py', 'r') as update_file:
+            with open('main.py', 'w') as main_file:
+                while True:
+                    update_chunk = update_file.read(512)
+                    if not update_chunk:
+                        break
+                    main_file.write(update_chunk)
+        print('Update applied, restarting...')
+        machine.reset()  # Restart the Pico to apply the update
+    except Exception as e:
+        print(f'Error checking for updates: {e}')
+    finally:
+        # Clean up the temporary update file
+        try:
+            os.remove('new_main.py')
+        except:
+            pass
 
 # Function to open a socket for HTTP communication
 def open_socket(ip):
@@ -402,6 +480,10 @@ def webpage(temperature, state, moisture, auto_water, data_points, threshold):
     """
     return str(html)
 
+# Function to log messages
+def log_message(message):
+    print(f"[{localtime_to_string(localtime())}] {message}")
+
 # Function to handle different request paths
 def handle_request(request_path):
     global pump_control_override
@@ -424,7 +506,7 @@ def handle_request(request_path):
         return '200 OK', None
     if request_path.startswith('/autowater'):
         pump_control_override = False
-        print("Autowater activated. Automatic control re-enabled.")
+        log_message("Autowater activated. Automatic control re-enabled.")
         return '200 OK', None
     if request_path.startswith('/threshold'):
         threshold_value = request_path.split('=')[1]
@@ -468,14 +550,22 @@ def main():
     global last_pump_activation
     global cooldown_active
     global last_pump_deactivation
+    global last_update_check
+
     connection = initialize_system()
     state = 'OFF'
     auto_water = False
+    wlan = network.WLAN(network.STA_IF)
 
     while True:
         try:
             current_time = utime.time()
-            
+
+            # Check for updates at the specified interval
+            if current_time - last_update_check >= update_check_interval:
+                check_for_updates()
+                last_update_check = current_time
+
             client, addr = connection.accept()
             request = client.recv(1024)
             request = request.decode('utf-8')
@@ -541,10 +631,17 @@ def main():
             # Force garbage collection to free memory
             gc.collect()
 
+            # Check Wi-Fi connection status and reset if disconnected
+            if not wlan.isconnected():
+                print("Lost Wi-Fi connection. Attempting to reconnect...")
+                connect()
+
+        except MemoryError:
+            print('MemoryError: restarting...')
+            machine.reset()
         except Exception as e:
             print(f'An error occurred: {e}')
             machine.reset()  # Reset the Pico on exception
 
 # Run the main loop
 main()
-
